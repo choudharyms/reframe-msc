@@ -2,7 +2,6 @@ import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { fetchFile } from "@ffmpeg/util";
 import { EditRecipe, ExportResult, BackgroundMusicOptions, ImageOverlayOptions } from "./types";
 import { getPresetById } from "./presets";
-import { simd } from "wasm-feature-detect";
 
 const CORE_BASE_URL = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd";
 
@@ -96,7 +95,6 @@ function buildVideoFilter(recipe: EditRecipe, targetW: number, targetH: number):
     filters.push("setpts=PTS-STARTPTS");
   }
 
- 
   if (recipe.stabilization) {
     filters.push("deshake");
   }
@@ -131,7 +129,7 @@ function buildVideoFilter(recipe: EditRecipe, targetW: number, targetH: number):
   return filters.join(",");
 }
 
- export function buildAudioFilter(speed: number, normalizeAudio: boolean): string {
+export function buildAudioFilter(speed: number, normalizeAudio: boolean = false): string {
   const filters: string[] = [];
 
   let remaining = speed;
@@ -145,7 +143,7 @@ function buildVideoFilter(recipe: EditRecipe, targetW: number, targetH: number):
     remaining /= 2.0;
   }
 
- if (Math.abs(remaining - 1.0) > 0.001) {
+  if (Math.abs(remaining - 1.0) > 0.001) {
     filters.push(`atempo=${Number(remaining.toFixed(4))}`);
   }
 
@@ -162,7 +160,7 @@ function buildAudioTrimFilter(recipe: EditRecipe): string {
 
 function buildArguments(
   recipe: EditRecipe,
-  format: "mp4" | "webm" | "mkv" | "gif",
+  format: EditRecipe["format"],
   outputName: string,
   inputName: string,
   targetW: number,
@@ -175,9 +173,10 @@ function buildArguments(
   overlayOptions: ImageOverlayOptions | undefined,
   hasOriginalAudio: boolean
 ): string[] {
-  const vf = buildVideoFilter(recipe, targetW, targetH);
+  const isAudioOnly = format === "mp3" || format === "aac";
+  const vf = isAudioOnly ? "" : buildVideoFilter(recipe, targetW, targetH);
   const audioTrim = hasOriginalAudio ? buildAudioTrimFilter(recipe) : "";
-const audioSpeed = hasOriginalAudio ? buildAudioFilter(recipe.speed, recipe.normalizeAudio ?? false) : "";
+  const audioSpeed = hasOriginalAudio ? buildAudioFilter(recipe.speed, recipe.normalizeAudio ?? false) : "";
   const afParts = [audioTrim, audioSpeed].filter(Boolean);
   const af = afParts.join(",");
 
@@ -190,23 +189,23 @@ const audioSpeed = hasOriginalAudio ? buildAudioFilter(recipe.speed, recipe.norm
     if (musicOptions!.loopMusic) args.push("-stream_loop", "-1");
     args.push("-i", musicInputName);
   }
-  if (hasOverlay) {
+  if (hasOverlay && !isAudioOnly) {
     args.push("-i", overlayInputName);
   }
 
-  const needsFilterComplex = hasOverlay || hasMusicTrack;
+  const needsFilterComplex = (hasOverlay && !isAudioOnly) || hasMusicTrack;
   const shouldKeepAudio = recipe.keepAudio && (hasOriginalAudio || hasMusicTrack);
 
   if (needsFilterComplex) {
     const filterParts: string[] = [];
     let videoOut = "[0:v]";
 
-    if (vf) {
+    if (vf && !isAudioOnly) {
       filterParts.push(`[0:v]${vf}[vbase]`);
       videoOut = "[vbase]";
     }
 
-    if (hasOverlay) {
+    if (hasOverlay && !isAudioOnly) {
       const scaledW = overlayOptions!.size;
       const alpha = (overlayOptions!.opacity / 100).toFixed(2);
       const posMap: Record<string, string> = {
@@ -247,7 +246,10 @@ const audioSpeed = hasOriginalAudio ? buildAudioFilter(recipe.speed, recipe.norm
     if (filterParts.length > 0) {
       args.push("-filter_complex", filterParts.join(";"));
     }
-    args.push("-map", videoOut === "[0:v]" ? "0:v" : videoOut);
+    
+    if (!isAudioOnly) {
+      args.push("-map", videoOut === "[0:v]" ? "0:v" : videoOut);
+    }
 
     if (!shouldKeepAudio) {
       args.push("-an");
@@ -257,7 +259,7 @@ const audioSpeed = hasOriginalAudio ? buildAudioFilter(recipe.speed, recipe.norm
       args.push("-map", "0:a");
     }
   } else {
-    if (vf) args.push("-vf", vf);
+    if (vf && !isAudioOnly) args.push("-vf", vf);
     if (!shouldKeepAudio) {
       args.push("-an");
     } else if (af && hasOriginalAudio) {
@@ -265,7 +267,11 @@ const audioSpeed = hasOriginalAudio ? buildAudioFilter(recipe.speed, recipe.norm
     }
   }
 
-  if (format === "webm") {
+  if (format === "mp3") {
+    args.push("-vn", "-c:a", "libmp3lame");
+  } else if (format === "aac") {
+    args.push("-vn", "-c:a", "aac", "-b:a", "128k");
+  } else if (format === "webm") {
     args.push("-c:v", "libvpx-vp9", "-b:v", "0", "-crf", String(recipe.quality));
     if (shouldKeepAudio) args.push("-c:a", "libopus");
   } else if (format === "mkv") {
@@ -314,6 +320,10 @@ export async function exportVideo(
         return { filename: `output_${sessionId}.mkv`, mimeType: "video/x-matroska" };
       case "gif":
         return { filename: `output_${sessionId}.gif`, mimeType: "image/gif" };
+      case "mp3":
+        return { filename: `output_${sessionId}.mp3`, mimeType: "audio/mpeg" };
+      case "aac":
+        return { filename: `output_${sessionId}.aac`, mimeType: "audio/aac" };
       default:
         return { filename: `output_${sessionId}.mp4`, mimeType: "video/mp4" };
     }
@@ -328,16 +338,17 @@ export async function exportVideo(
     onProgress(Math.min(99, Math.round(progress * 100)));
   };
 
-  
   try {
     await ffmpeg.writeFile(inputName, await fetchFile(file), { signal });
 
-    const vf = buildVideoFilter(recipe, targetW, targetH);
-  const audioTrim = buildAudioTrimFilter(recipe);
-  const audioSpeed = buildAudioFilter(recipe.speed, recipe.normalizeAudio ?? false);
+    const isAudioOnly = recipe.format === "mp3" || recipe.format === "aac";
 
-  const afParts = [audioTrim, audioSpeed].filter(Boolean);
-  const af = afParts.join(",");
+    const vf = isAudioOnly ? "" : buildVideoFilter(recipe, targetW, targetH);
+    const audioTrim = buildAudioTrimFilter(recipe);
+    const audioSpeed = buildAudioFilter(recipe.speed, recipe.normalizeAudio ?? false);
+
+    const afParts = [audioTrim, audioSpeed].filter(Boolean);
+    const af = afParts.join(",");
     const hasMusicTrack = !!(musicOptions?.file && recipe.keepAudio);
     const musicInputName = `music_input_${sessionId}.mp3`;
     if (hasMusicTrack) {
@@ -345,7 +356,7 @@ export async function exportVideo(
       cleanupFiles.add(musicInputName);
     }
 
-    const hasOverlay = !!(overlayOptions?.file);
+    const hasOverlay = !!(overlayOptions?.file && !isAudioOnly);
     const overlayExt = overlayOptions?.file?.name.split(".").pop() ?? "png";
     const overlayInputName = `overlay_${sessionId}.${overlayExt}`;
     if (hasOverlay) {
@@ -417,7 +428,7 @@ export async function exportVideo(
     let exitCode = await ffmpeg.exec(args, undefined, { signal });
 
     // Attempt 2: Auto-recover if the file has no original audio track
-    if (exitCode !== 0 && missingAudioDetected) {
+    if (exitCode !== 0 && missingAudioDetected && !isAudioOnly) {
       missingAudioDetected = false;
       args = buildArguments(
         recipe, recipe.format, outputName, inputName, targetW, targetH,
@@ -429,6 +440,9 @@ export async function exportVideo(
 
     // Fallback Attempt 3: Switch codecs to WebM if container errors happen
     if (exitCode !== 0) {
+      if (isAudioOnly) {
+        throw new Error("Export failed");
+      }
       args = buildArguments(
         recipe, "webm", fallbackOutputName, inputName, targetW, targetH,
         hasMusicTrack, musicInputName, musicOptions,
@@ -462,7 +476,7 @@ export async function exportVideo(
       size: blob.size,
       width: targetW,
       height: targetH,
-      format: recipe.format as "mp4" | "webm" | "mkv",
+      format: recipe.format as EditRecipe["format"],
     };
   } finally {
     ffmpeg.off("progress", handleProgress);
