@@ -146,6 +146,7 @@ export function buildVideoFilter(recipe: EditRecipe, targetW: number, targetH: n
 }
 
 export function buildAudioFilter(speed: number, normalizeAudio: boolean = false): string {
+  if (speed <= 0) return "";
   const filters: string[] = [];
 
   let remaining = speed;
@@ -414,6 +415,7 @@ export async function exportVideo(
       onProgress(100);
       return {
         blobUrl: URL.createObjectURL(blob),
+        blob,
         size: blob.size,
         width: targetW,
         height: targetH,
@@ -476,6 +478,7 @@ export async function exportVideo(
       onProgress(100);
       return {
         blobUrl: URL.createObjectURL(blob),
+        blob,
         size: blob.size,
         width: targetW,
         height: targetH,
@@ -490,6 +493,7 @@ export async function exportVideo(
     onProgress(100);
     return {
       blobUrl: URL.createObjectURL(blob),
+      blob,
       size: blob.size,
       width: targetW,
       height: targetH,
